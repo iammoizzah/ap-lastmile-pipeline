@@ -37,7 +37,7 @@ docs/
 
 ## Status
 
-🚧 In development — see `docs/MVP_SPEC.md` §8 for the milestone roadmap.
+ In development — see `docs/MVP_SPEC.md` §8 for the milestone roadmap.
 
 ## Local setup
 
