@@ -19,10 +19,11 @@ out/
 .vscode/
 .idea/
 
-# Data (do not commit real uploads or DB dumps)
-backend/data/uploads/
+# Data (do not commit real uploads, downloaded datasets, or DB dumps)
+backend/data/
 *.sqlite3
 *.db
 
 # Env files with secrets
 *.env
+

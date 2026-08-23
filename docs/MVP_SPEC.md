@@ -204,3 +204,4 @@ No message queue for MVP — invoice/transaction rows carry a `status` field; th
 ## 11. Free Stack Summary
 
 Frontend: Next.js on Vercel · Backend: FastAPI on Render · DB: Neon or Supabase Postgres · Storage: Supabase Storage · Extraction: Tesseract + rules (LLM path optional/flagged) · No paid infra required.
+

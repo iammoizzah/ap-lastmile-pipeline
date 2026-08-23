@@ -1,0 +1,17 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ap_pipeline_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ap_user
+      POSTGRES_PASSWORD: ap_pass
+      POSTGRES_DB: ap_pipeline
+    ports:
+      - "5432:5432"
+    volumes:
+      - ap_pipeline_pgdata:/var/lib/postgresql/data
+
+volumes:
+  ap_pipeline_pgdata:
+

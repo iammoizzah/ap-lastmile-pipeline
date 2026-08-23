@@ -18,6 +18,8 @@ See [`docs/MVP_SPEC.md`](docs/MVP_SPEC.md) for the full spec: user stories, data
 - **Storage:** Supabase Storage
 - **Extraction:** Tesseract OCR + rule-based parsing (optional LLM path, flagged)
 
+Entirely free-tier deployable — no paid infra required.
+
 ## Project structure
 
 ```
@@ -41,4 +43,31 @@ docs/
 
 ## Local setup
 
-_Coming in Milestone 1 — backend/DB scaffold and seed script._
+```bash
+# 1. Start Postgres locally
+docker compose up -d
+
+# 2. Set up the Python backend
+cd backend
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env
+
+# 3. Create tables
+python scripts/init_db.py
+
+# 4. Seed demo tenant, vendors, POs, synthetic bank transactions
+python scripts/seed.py
+
+# 5. (Optional) download real sample invoice receipts for extraction testing
+python scripts/download_sroie.py --n 25
+
+# 6. Run the API
+uvicorn app.main:app --reload
+# -> http://localhost:8000/health
+```
+
+**Milestone 1 status:** DB schema + seed data + sample real receipts. No
+extraction, matching, or review endpoints yet — those are Milestones 2-5
+(see `docs/MVP_SPEC.md` §8).
+
