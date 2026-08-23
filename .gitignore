@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+.env
+.env.local
+.env*.local
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Data (do not commit real uploads or DB dumps)
+backend/data/uploads/
+*.sqlite3
+*.db
+
+# Env files with secrets
+*.env
