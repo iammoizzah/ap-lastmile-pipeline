@@ -66,5 +66,4 @@ uvicorn app.main:app --reload
 ```
 
 **Milestone 1 status:** DB schema + seed data + sample real receipts. No
-extraction, matching, or review endpoints yet — those are Milestones 2-5
-(see `docs/MVP_SPEC.md` §8).
+extraction, matching, or review endpoints yet
