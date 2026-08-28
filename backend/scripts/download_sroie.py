@@ -1,11 +1,13 @@
 """
 Downloads a sample of the SROIE dataset (ICDAR 2019 Robust Reading
-Challenge — 973 real scanned receipts with ground-truth company/date/total
-annotations) from its Hugging Face mirror, for use as realistic test input
-to the invoice extraction pipeline.
+Challenge — real scanned receipts with ground-truth key-info annotations:
+company, date, address, total) from its Hugging Face mirror, for use as
+realistic test input to the invoice extraction pipeline.
 
-Source: https://huggingface.co/datasets/rth/sroie-2019-v2
-(mirrors the original ICDAR 2019 SROIE competition data)
+Source: https://huggingface.co/datasets/jsdnrs/ICDAR2019-SROIE
+(corrected/extended version of the original ICDAR 2019 SROIE Task 3 data;
+confirmed schema: image, key, image_size, entities{company,date,address,total},
+words, bboxes)
 
 Requires: pip install datasets  (already in requirements.txt)
 
@@ -14,8 +16,10 @@ Usage:
     python scripts/download_sroie.py --n 25
 
 Output:
-    backend/data/receipts/<id>.jpg
-    backend/data/receipts/<id>.json   (ground truth: company, date, total, address)
+    backend/data/receipts/<key>.jpg
+    backend/data/receipts/<key>.json   (ground truth: company, date, total,
+                                         address, plus raw OCR words/bboxes
+                                         for later line-level matching)
 """
 import argparse
 import json
@@ -24,51 +28,53 @@ import os
 OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "receipts")
 
 
-def main(n: int):
+def main(n: int, split: str):
     try:
         from datasets import load_dataset
     except ImportError:
         raise SystemExit(
-            "Missing dependency. Run: pip install datasets"
+            "Missing dependency. Run: python3 -m pip install -r requirements.txt"
         )
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    print(f"Loading SROIE sample from Hugging Face (rth/sroie-2019-v2), n={n} ...")
-    ds = load_dataset("rth/sroie-2019-v2", split=f"train[:{n}]")
+    print(f"Loading SROIE sample from Hugging Face (jsdnrs/ICDAR2019-SROIE), "
+          f"split={split}, n={n} ...")
+    ds = load_dataset("jsdnrs/ICDAR2019-SROIE", split=f"{split}[:{n}]")
 
     saved = 0
-    for i, row in enumerate(ds):
+    for row in ds:
         try:
+            key = row["key"]
             image = row["image"]
-            gt_raw = row.get("text", row.get("ground_truth", None))
 
-            img_path = os.path.join(OUT_DIR, f"receipt_{i:04d}.jpg")
+            img_path = os.path.join(OUT_DIR, f"{key}.jpg")
             image.convert("RGB").save(img_path)
 
-            gt_path = os.path.join(OUT_DIR, f"receipt_{i:04d}.json")
+            gt_path = os.path.join(OUT_DIR, f"{key}.json")
+            ground_truth = {
+                "key": key,
+                "entities": row.get("entities", {}),
+                "words": row.get("words", []),
+                "bboxes": row.get("bboxes", []),
+            }
             with open(gt_path, "w") as f:
-                if isinstance(gt_raw, str):
-                    try:
-                        parsed = json.loads(gt_raw)
-                    except json.JSONDecodeError:
-                        parsed = {"raw": gt_raw}
-                else:
-                    parsed = gt_raw or {}
-                json.dump(parsed, f, indent=2)
+                json.dump(ground_truth, f, indent=2)
 
             saved += 1
         except Exception as e:
-            print(f"  skipped row {i}: {e}")
+            print(f"  skipped {row.get('key', '?')}: {e}")
 
     print(f"Saved {saved} receipt images + ground-truth files to {OUT_DIR}")
-    print("Note: field names in ground truth vary slightly across dataset "
-          "revisions — inspect one .json file before wiring up the extraction "
-          "accuracy check in Milestone 2.")
+    if saved:
+        sample_key = json.load(open(os.path.join(OUT_DIR, f"{ds[0]['key']}.json")))
+        print("Sample entities from first receipt:", sample_key["entities"])
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--n", type=int, default=25, help="number of receipts to download")
+    parser.add_argument("--split", type=str, default="test", choices=["train", "test"],
+                         help="which SROIE split to pull from (default: test, 361 receipts)")
     args = parser.parse_args()
-    main(args.n)
+    main(args.n, args.split)
 
