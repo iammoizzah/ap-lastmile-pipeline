@@ -18,6 +18,8 @@ See [`docs/MVP_SPEC.md`](docs/MVP_SPEC.md) for the full spec: user stories, data
 - **Storage:** Supabase Storage
 - **Extraction:** Tesseract OCR + rule-based parsing (optional LLM path, flagged)
 
+Entirely free-tier deployable — no paid infra required.
+
 ## Project structure
 
 ```
@@ -37,7 +39,7 @@ docs/
 
 ## Status
 
- In development — see `docs/MVP_SPEC.md` §8 for the milestone roadmap.
+🚧 In development — see `docs/MVP_SPEC.md` §8 for the milestone roadmap.
 
 ## Local setup
 
@@ -66,4 +68,6 @@ uvicorn app.main:app --reload
 ```
 
 **Milestone 1 status:** DB schema + seed data + sample real receipts. No
-extraction, matching, or review endpoints yet
+extraction, matching, or review endpoints yet — those are Milestones 2-5
+(see `docs/MVP_SPEC.md` §8).
+
