@@ -184,6 +184,8 @@ cat > "backend/app/main.py" << 'SCRIPT_EOF'
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.routes import invoices
+
 app = FastAPI(title="AP Last-Mile Pipeline API", version="0.1.0")
 
 app.add_middleware(
@@ -193,15 +195,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(invoices.router, prefix="/invoices", tags=["invoices"])
+
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 
-# Routers get mounted here as milestones add them:
-# from app.routes import invoices, reconcile, admin, metrics
-# app.include_router(invoices.router, prefix="/invoices", tags=["invoices"])
+# Additional routers get mounted here as later milestones add them:
+# from app.routes import reconcile, admin, metrics
+# app.include_router(reconcile.router, prefix="/reconcile", tags=["reconcile"])
 
 SCRIPT_EOF
 
@@ -241,6 +245,169 @@ SCRIPT_EOF
 
 mkdir -p "backend/app/services"
 cat > "backend/app/services/__init__.py" << 'SCRIPT_EOF'
+
+SCRIPT_EOF
+
+mkdir -p "backend/app/services"
+cat > "backend/app/services/extraction.py" << 'SCRIPT_EOF'
+"""
+Extraction service: turns a receipt/invoice image into structured fields
+(company, date, total) with a confidence score and a stated reason for
+each field — not just a black-box number. This is deliberately rule-based
+rather than an LLM call: it's boring, cheap, fast, fully explainable, and
+gives us a real accuracy baseline to compare an optional LLM path against
+later (see extraction_method="llm" on the Invoice model for that hook).
+
+Design note for the case study: routing on confidence, not on "is this
+right", is the actual product decision here. A human reviewer should see
+*why* something is uncertain (which field, which heuristic failed) rather
+than just a float.
+"""
+import re
+from datetime import datetime
+from dataclasses import dataclass, field
+from typing import Optional
+
+try:
+    import pytesseract
+    from PIL import Image
+except ImportError:
+    pytesseract = None
+    Image = None
+
+
+# --- OCR -----------------------------------------------------------------
+
+def run_ocr(image_path: str) -> str:
+    """Runs Tesseract OCR on an image file, returns raw text."""
+    if pytesseract is None:
+        raise RuntimeError(
+            "pytesseract/Pillow not installed. Run: python3 -m pip install -r requirements.txt"
+        )
+    image = Image.open(image_path)
+    return pytesseract.image_to_string(image)
+
+
+# --- Field parsers ---------------------------------------------------------
+
+TOTAL_KEYWORDS = re.compile(
+    r"(GRAND\s*TOTAL|TOTAL\s*AMOUNT|AMOUNT\s*DUE|TOTAL\s*DUE|NET\s*TOTAL|^TOTAL)",
+    re.IGNORECASE,
+)
+MONEY_PATTERN = re.compile(r"(?<![\d.])(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})|\d+\.\d{2})(?!\d)")
+
+DATE_PATTERNS = [
+    # DD/MM/YYYY or DD-MM-YYYY
+    re.compile(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b"),
+    # YYYY-MM-DD
+    re.compile(r"\b(\d{4}-\d{1,2}-\d{1,2})\b"),
+    # 15 JAN 2019 / 15 January 2019
+    re.compile(
+        r"\b(\d{1,2}\s+(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+\d{2,4})\b",
+        re.IGNORECASE,
+    ),
+]
+
+COMPANY_SUFFIXES = re.compile(
+    r"\b(SDN\s*BHD|ENTERPRISE|TRADING|SERVICES?|STORE|MARKET|SHOP|SUPPLIES|"
+    r"RESTAURANT|CAFE|HARDWARE|INDUSTRIES|CORPORATION|CORP|CO\.?\s*LTD|LLC|INC)\b",
+    re.IGNORECASE,
+)
+NOISE_LINE = re.compile(r"^[\W_]*$|COPY|RECEIPT|INVOICE|TAX\s*INVOICE", re.IGNORECASE)
+
+
+@dataclass
+class FieldResult:
+    value: Optional[str]
+    confidence: float
+    reason: str
+
+
+@dataclass
+class ExtractionResult:
+    company: FieldResult
+    date: FieldResult
+    total: FieldResult
+    raw_text: str
+    anomaly_flags: list = field(default_factory=list)
+
+    @property
+    def overall_confidence(self) -> float:
+        vals = [self.company.confidence, self.date.confidence, self.total.confidence]
+        return round(sum(vals) / len(vals), 3)
+
+
+def extract_total(lines: list[str]) -> FieldResult:
+    # Pass 1: look for an explicit "TOTAL"-style keyword line with a money value
+    for line in lines:
+        if TOTAL_KEYWORDS.search(line):
+            m = MONEY_PATTERN.findall(line)
+            if m:
+                value = m[-1].replace(",", "")
+                return FieldResult(value, 0.9, f"matched keyword line: {line.strip()!r}")
+
+    # Pass 2: fallback — largest money value anywhere in the document
+    all_amounts = []
+    for line in lines:
+        for m in MONEY_PATTERN.findall(line):
+            try:
+                all_amounts.append(float(m.replace(",", "")))
+            except ValueError:
+                continue
+    if all_amounts:
+        value = f"{max(all_amounts):.2f}"
+        return FieldResult(value, 0.5, "fallback: largest money value on receipt (no TOTAL keyword found)")
+
+    return FieldResult(None, 0.0, "no money values found")
+
+
+def extract_date(lines: list[str]) -> FieldResult:
+    for line in lines:
+        for pattern in DATE_PATTERNS:
+            m = pattern.search(line)
+            if m:
+                return FieldResult(m.group(1), 0.9, f"matched date pattern in line: {line.strip()!r}")
+    return FieldResult(None, 0.0, "no date pattern matched")
+
+
+def extract_company(lines: list[str]) -> FieldResult:
+    candidates = [l for l in lines[:8] if l.strip() and not NOISE_LINE.match(l.strip())]
+
+    # Pass 1: a line with a company-like suffix (SDN BHD, ENTERPRISE, etc.)
+    for line in candidates:
+        if COMPANY_SUFFIXES.search(line):
+            return FieldResult(line.strip(), 0.8, f"matched company-suffix pattern: {line.strip()!r}")
+
+    # Pass 2: fallback — first substantial all-caps-ish line near the top
+    for line in candidates:
+        letters = re.sub(r"[^A-Za-z]", "", line)
+        if len(letters) >= 5 and letters.isupper():
+            return FieldResult(line.strip(), 0.4, "fallback: first substantial uppercase line near top")
+
+    return FieldResult(None, 0.0, "no plausible company line found in top of receipt")
+
+
+def extract_fields(raw_text: str) -> ExtractionResult:
+    lines = [l for l in raw_text.splitlines() if l.strip()]
+
+    company = extract_company(lines)
+    date = extract_date(lines)
+    total = extract_total(lines)
+
+    anomalies = []
+    if company.value is None:
+        anomalies.append("no_company_match")
+    if date.value is None:
+        anomalies.append("no_date_match")
+    if total.value is None:
+        anomalies.append("no_total_match")
+
+    return ExtractionResult(company=company, date=date, total=total, raw_text=raw_text, anomaly_flags=anomalies)
+
+
+def extract_from_image(image_path: str) -> ExtractionResult:
+    raw_text = run_ocr(image_path)
+    return extract_fields(raw_text)
 
 SCRIPT_EOF
 
@@ -402,6 +569,117 @@ cat > "backend/app/routes/__init__.py" << 'SCRIPT_EOF'
 
 SCRIPT_EOF
 
+mkdir -p "backend/app/routes"
+cat > "backend/app/routes/invoices.py" << 'SCRIPT_EOF'
+import os
+import shutil
+import uuid
+
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.models.models import Tenant, Invoice
+from app.services.extraction import extract_from_image
+
+router = APIRouter()
+
+UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "uploads")
+
+
+def _get_demo_tenant(db: Session) -> Tenant:
+    """MVP shortcut: use the first seeded tenant. Replace with real auth-derived
+    tenant lookup once Milestone 3's review UI needs actual multi-user login."""
+    tenant = db.query(Tenant).first()
+    if tenant is None:
+        raise HTTPException(status_code=400, detail="No tenant found — run scripts/seed.py first")
+    return tenant
+
+
+@router.post("/upload")
+def upload_invoice(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    tenant = _get_demo_tenant(db)
+
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    ext = os.path.splitext(file.filename)[1] or ".jpg"
+    saved_name = f"{uuid.uuid4()}{ext}"
+    saved_path = os.path.join(UPLOAD_DIR, saved_name)
+
+    with open(saved_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    result = extract_from_image(saved_path)
+
+    total_value = None
+    if result.total.value is not None:
+        try:
+            total_value = float(result.total.value)
+        except ValueError:
+            result.anomaly_flags.append("total_not_numeric")
+
+    invoice = Invoice(
+        tenant_id=tenant.id,
+        source_file_url=saved_path,
+        extracted_vendor=result.company.value,
+        extracted_date=result.date.value,
+        extracted_total=total_value,
+        extracted_line_items=[],
+        extraction_confidence=result.overall_confidence,
+        extraction_method="ocr_rules",
+        anomaly_flags=result.anomaly_flags,
+        status="pending_review",
+    )
+    db.add(invoice)
+    db.commit()
+    db.refresh(invoice)
+
+    return {
+        "invoice_id": invoice.id,
+        "status": invoice.status,
+        "extracted": {
+            "company": {"value": result.company.value, "confidence": result.company.confidence, "reason": result.company.reason},
+            "date": {"value": result.date.value, "confidence": result.date.confidence, "reason": result.date.reason},
+            "total": {"value": result.total.value, "confidence": result.total.confidence, "reason": result.total.reason},
+        },
+        "overall_confidence": result.overall_confidence,
+        "anomaly_flags": result.anomaly_flags,
+    }
+
+
+@router.get("/{invoice_id}")
+def get_invoice(invoice_id: str, db: Session = Depends(get_db)):
+    invoice = db.query(Invoice).filter(Invoice.id == invoice_id).first()
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    return {
+        "id": invoice.id,
+        "status": invoice.status,
+        "extracted_vendor": invoice.extracted_vendor,
+        "extracted_date": invoice.extracted_date,
+        "extracted_total": invoice.extracted_total,
+        "extraction_confidence": invoice.extraction_confidence,
+        "anomaly_flags": invoice.anomaly_flags,
+        "source_file_url": invoice.source_file_url,
+    }
+
+
+@router.get("")
+def list_invoices(db: Session = Depends(get_db)):
+    invoices = db.query(Invoice).order_by(Invoice.uploaded_at.desc()).limit(100).all()
+    return [
+        {
+            "id": inv.id,
+            "status": inv.status,
+            "extracted_vendor": inv.extracted_vendor,
+            "extracted_total": inv.extracted_total,
+            "extraction_confidence": inv.extraction_confidence,
+            "anomaly_flags": inv.anomaly_flags,
+        }
+        for inv in invoices
+    ]
+
+SCRIPT_EOF
+
 mkdir -p "backend/migrations"
 cat > "backend/migrations/.gitkeep" << 'SCRIPT_EOF'
 
@@ -445,12 +723,14 @@ mkdir -p "backend/scripts"
 cat > "backend/scripts/download_sroie.py" << 'SCRIPT_EOF'
 """
 Downloads a sample of the SROIE dataset (ICDAR 2019 Robust Reading
-Challenge — 973 real scanned receipts with ground-truth company/date/total
-annotations) from its Hugging Face mirror, for use as realistic test input
-to the invoice extraction pipeline.
+Challenge — real scanned receipts with ground-truth key-info annotations:
+company, date, address, total) from its Hugging Face mirror, for use as
+realistic test input to the invoice extraction pipeline.
 
-Source: https://huggingface.co/datasets/rth/sroie-2019-v2
-(mirrors the original ICDAR 2019 SROIE competition data)
+Source: https://huggingface.co/datasets/jsdnrs/ICDAR2019-SROIE
+(corrected/extended version of the original ICDAR 2019 SROIE Task 3 data;
+confirmed schema: image, key, image_size, entities{company,date,address,total},
+words, bboxes)
 
 Requires: pip install datasets  (already in requirements.txt)
 
@@ -459,8 +739,10 @@ Usage:
     python scripts/download_sroie.py --n 25
 
 Output:
-    backend/data/receipts/<id>.jpg
-    backend/data/receipts/<id>.json   (ground truth: company, date, total, address)
+    backend/data/receipts/<key>.jpg
+    backend/data/receipts/<key>.json   (ground truth: company, date, total,
+                                         address, plus raw OCR words/bboxes
+                                         for later line-level matching)
 """
 import argparse
 import json
@@ -469,53 +751,55 @@ import os
 OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "receipts")
 
 
-def main(n: int):
+def main(n: int, split: str):
     try:
         from datasets import load_dataset
     except ImportError:
         raise SystemExit(
-            "Missing dependency. Run: pip install datasets"
+            "Missing dependency. Run: python3 -m pip install -r requirements.txt"
         )
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    print(f"Loading SROIE sample from Hugging Face (rth/sroie-2019-v2), n={n} ...")
-    ds = load_dataset("rth/sroie-2019-v2", split=f"train[:{n}]")
+    print(f"Loading SROIE sample from Hugging Face (jsdnrs/ICDAR2019-SROIE), "
+          f"split={split}, n={n} ...")
+    ds = load_dataset("jsdnrs/ICDAR2019-SROIE", split=f"{split}[:{n}]")
 
     saved = 0
-    for i, row in enumerate(ds):
+    for row in ds:
         try:
+            key = row["key"]
             image = row["image"]
-            gt_raw = row.get("text", row.get("ground_truth", None))
 
-            img_path = os.path.join(OUT_DIR, f"receipt_{i:04d}.jpg")
+            img_path = os.path.join(OUT_DIR, f"{key}.jpg")
             image.convert("RGB").save(img_path)
 
-            gt_path = os.path.join(OUT_DIR, f"receipt_{i:04d}.json")
+            gt_path = os.path.join(OUT_DIR, f"{key}.json")
+            ground_truth = {
+                "key": key,
+                "entities": row.get("entities", {}),
+                "words": row.get("words", []),
+                "bboxes": row.get("bboxes", []),
+            }
             with open(gt_path, "w") as f:
-                if isinstance(gt_raw, str):
-                    try:
-                        parsed = json.loads(gt_raw)
-                    except json.JSONDecodeError:
-                        parsed = {"raw": gt_raw}
-                else:
-                    parsed = gt_raw or {}
-                json.dump(parsed, f, indent=2)
+                json.dump(ground_truth, f, indent=2)
 
             saved += 1
         except Exception as e:
-            print(f"  skipped row {i}: {e}")
+            print(f"  skipped {row.get('key', '?')}: {e}")
 
     print(f"Saved {saved} receipt images + ground-truth files to {OUT_DIR}")
-    print("Note: field names in ground truth vary slightly across dataset "
-          "revisions — inspect one .json file before wiring up the extraction "
-          "accuracy check in Milestone 2.")
+    if saved:
+        sample_key = json.load(open(os.path.join(OUT_DIR, f"{ds[0]['key']}.json")))
+        print("Sample entities from first receipt:", sample_key["entities"])
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--n", type=int, default=25, help="number of receipts to download")
+    parser.add_argument("--split", type=str, default="test", choices=["train", "test"],
+                         help="which SROIE split to pull from (default: test, 361 receipts)")
     args = parser.parse_args()
-    main(args.n)
+    main(args.n, args.split)
 
 SCRIPT_EOF
 
@@ -536,7 +820,7 @@ Usage:
 import sys
 import os
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -605,7 +889,7 @@ def main():
 
         # Bank transactions: some match POs with noise (fees, date drift, mangled refs),
         # some are unrelated real-world noise (bank fees, unrelated deposits).
-        batch_id = f"batch-{datetime.utcnow().strftime('%Y%m%d')}"
+        batch_id = f"batch-{datetime.now(timezone.utc).strftime('%Y%m%d')}"
         matched_source_pos = random.sample(pos, k=min(NUM_BANK_TXNS - 8, len(pos)))
 
         for po in matched_source_pos:
@@ -615,7 +899,7 @@ def main():
             txn = BankTransaction(
                 tenant_id=tenant.id,
                 upload_batch_id=batch_id,
-                txn_date=datetime.utcnow() - timedelta(days=random.randint(1, 30)) + date_drift,
+                txn_date=datetime.now(timezone.utc) - timedelta(days=random.randint(1, 30)) + date_drift,
                 amount=amount,
                 description_raw=f"ACH PMT {po.po_number} {fake.company().upper()}",
                 reference_raw=messy_reference(po.po_number),
@@ -627,7 +911,7 @@ def main():
             txn = BankTransaction(
                 tenant_id=tenant.id,
                 upload_batch_id=batch_id,
-                txn_date=datetime.utcnow() - timedelta(days=random.randint(1, 30)),
+                txn_date=datetime.now(timezone.utc) - timedelta(days=random.randint(1, 30)),
                 amount=round(random.uniform(-50, 500), 2),
                 description_raw=random.choice(
                     ["MONTHLY SERVICE FEE", "WIRE FEE", "MISC DEPOSIT", "INTEREST CREDIT"]
@@ -655,6 +939,146 @@ SCRIPT_EOF
 
 mkdir -p "backend/scripts"
 cat > "backend/scripts/.gitkeep" << 'SCRIPT_EOF'
+
+SCRIPT_EOF
+
+mkdir -p "backend/scripts"
+cat > "backend/scripts/eval_extraction.py" << 'SCRIPT_EOF'
+"""
+Runs the extraction service against every downloaded SROIE receipt and
+scores it against the real ground truth (company/date/total) — giving you
+an actual, citable accuracy number for the case study instead of a guess.
+
+Usage:
+    cd backend
+    python scripts/eval_extraction.py
+"""
+import sys
+import os
+import json
+import re
+import glob
+from datetime import datetime
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from app.services.extraction import extract_from_image
+
+RECEIPTS_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "receipts")
+
+
+def normalize_text(s: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", s.upper()) if s else ""
+
+
+def normalize_amount(s: str):
+    try:
+        return round(float(str(s).replace(",", "").replace("RM", "").strip()), 2)
+    except (ValueError, TypeError):
+        return None
+
+
+DATE_FORMATS = [
+    "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y", "%d-%m-%y",
+    "%d %b %Y", "%d %B %Y",
+]
+
+
+def normalize_date(s: str):
+    if not s:
+        return None
+    s = s.strip()
+    for fmt in DATE_FORMATS:
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return s.upper()  # fall back to raw comparison if unparseable
+
+
+def company_match(extracted: str, truth: str) -> bool:
+    if not extracted or not truth:
+        return False
+    e, t = normalize_text(extracted), normalize_text(truth)
+    return e in t or t in e  # substring match — receipts often extract a partial name
+
+
+def main():
+    image_paths = sorted(glob.glob(os.path.join(RECEIPTS_DIR, "*.jpg")))
+    if not image_paths:
+        print(f"No receipts found in {RECEIPTS_DIR}. Run scripts/download_sroie.py first.")
+        return
+
+    total = len(image_paths)
+    correct = {"company": 0, "date": 0, "total": 0}
+    field_attempted = {"company": 0, "date": 0, "total": 0}
+    confidences = []
+    rows = []
+
+    for img_path in image_paths:
+        key = os.path.splitext(os.path.basename(img_path))[0]
+        gt_path = os.path.join(RECEIPTS_DIR, f"{key}.json")
+        if not os.path.exists(gt_path):
+            continue
+        gt = json.load(open(gt_path))["entities"]
+
+        result = extract_from_image(img_path)
+        confidences.append(result.overall_confidence)
+
+        c_ok = company_match(result.company.value, gt.get("company"))
+        d_ok = normalize_date(result.date.value) == normalize_date(gt.get("date"))
+        t_ok = normalize_amount(result.total.value) == normalize_amount(gt.get("total"))
+
+        for field_name, ok, extracted in [
+            ("company", c_ok, result.company.value),
+            ("date", d_ok, result.date.value),
+            ("total", t_ok, result.total.value),
+        ]:
+            if extracted is not None:
+                field_attempted[field_name] += 1
+            if ok:
+                correct[field_name] += 1
+
+        rows.append({
+            "key": key,
+            "company_ok": c_ok, "date_ok": d_ok, "total_ok": t_ok,
+            "confidence": result.overall_confidence,
+        })
+
+    print(f"\n=== Extraction accuracy over {total} real SROIE receipts ===\n")
+    for f in ["company", "date", "total"]:
+        acc = correct[f] / total * 100
+        precision = (correct[f] / field_attempted[f] * 100) if field_attempted[f] else 0
+        print(f"  {f:10s}  accuracy: {acc:5.1f}%   "
+              f"(precision when attempted: {precision:5.1f}%, "
+              f"attempted {field_attempted[f]}/{total})")
+
+    overall = sum(correct.values()) / (total * 3) * 100
+    avg_conf = sum(confidences) / len(confidences) if confidences else 0
+    print(f"\n  Overall field accuracy: {overall:.1f}%")
+    print(f"  Average confidence score: {avg_conf:.2f}")
+
+    # Confidence calibration check: are low-confidence extractions actually
+    # more often wrong? This is the number that matters most for the HITL
+    # story — it justifies routing low-confidence items to human review.
+    low_conf_rows = [r for r in rows if r["confidence"] < 0.7]
+    if low_conf_rows:
+        low_conf_wrong = sum(
+            1 for r in low_conf_rows if not (r["company_ok"] and r["date_ok"] and r["total_ok"])
+        )
+        print(f"\n  Low-confidence (<0.7) receipts: {len(low_conf_rows)}/{total}")
+        print(f"  Of those, fully-wrong-somewhere: {low_conf_wrong}/{len(low_conf_rows)} "
+              f"({low_conf_wrong/len(low_conf_rows)*100:.0f}%) — this is the routing signal HITL relies on")
+
+    out_path = os.path.join(os.path.dirname(__file__), "..", "data", "extraction_eval_report.json")
+    with open(out_path, "w") as f:
+        json.dump({"total": total, "correct": correct, "field_attempted": field_attempted,
+                    "overall_accuracy_pct": overall, "avg_confidence": avg_conf, "rows": rows}, f, indent=2, default=str)
+    print(f"\nFull report saved to {out_path}")
+
+
+if __name__ == "__main__":
+    main()
 
 SCRIPT_EOF
 
@@ -869,4 +1293,4 @@ Frontend: Next.js on Vercel · Backend: FastAPI on Render · DB: Neon or Supabas
 
 SCRIPT_EOF
 
-echo "✅ All files created."
+echo "✅ All files created/updated."
