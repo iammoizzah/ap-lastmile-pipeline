@@ -1,6 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.routes import invoices
+
 app = FastAPI(title="AP Last-Mile Pipeline API", version="0.1.0")
 
 app.add_middleware(
@@ -10,13 +12,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(invoices.router, prefix="/invoices", tags=["invoices"])
+
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 
-# Routers get mounted here as milestones add them:
-# from app.routes import invoices, reconcile, admin, metrics
-# app.include_router(invoices.router, prefix="/invoices", tags=["invoices"])
+# Additional routers get mounted here as later milestones add them:
+# from app.routes import reconcile, admin, metrics
+# app.include_router(reconcile.router, prefix="/reconcile", tags=["reconcile"])
 

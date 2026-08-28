@@ -13,7 +13,7 @@ Usage:
 import sys
 import os
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -82,7 +82,7 @@ def main():
 
         # Bank transactions: some match POs with noise (fees, date drift, mangled refs),
         # some are unrelated real-world noise (bank fees, unrelated deposits).
-        batch_id = f"batch-{datetime.utcnow().strftime('%Y%m%d')}"
+        batch_id = f"batch-{datetime.now(timezone.utc).strftime('%Y%m%d')}"
         matched_source_pos = random.sample(pos, k=min(NUM_BANK_TXNS - 8, len(pos)))
 
         for po in matched_source_pos:
@@ -92,7 +92,7 @@ def main():
             txn = BankTransaction(
                 tenant_id=tenant.id,
                 upload_batch_id=batch_id,
-                txn_date=datetime.utcnow() - timedelta(days=random.randint(1, 30)) + date_drift,
+                txn_date=datetime.now(timezone.utc) - timedelta(days=random.randint(1, 30)) + date_drift,
                 amount=amount,
                 description_raw=f"ACH PMT {po.po_number} {fake.company().upper()}",
                 reference_raw=messy_reference(po.po_number),
@@ -104,7 +104,7 @@ def main():
             txn = BankTransaction(
                 tenant_id=tenant.id,
                 upload_batch_id=batch_id,
-                txn_date=datetime.utcnow() - timedelta(days=random.randint(1, 30)),
+                txn_date=datetime.now(timezone.utc) - timedelta(days=random.randint(1, 30)),
                 amount=round(random.uniform(-50, 500), 2),
                 description_raw=random.choice(
                     ["MONTHLY SERVICE FEE", "WIRE FEE", "MISC DEPOSIT", "INTEREST CREDIT"]
