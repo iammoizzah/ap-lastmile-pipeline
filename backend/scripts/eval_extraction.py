@@ -1,3 +1,4 @@
+
 """
 Runs the extraction service against every downloaded SROIE receipt and
 scores it against the real ground truth (company/date/total) — giving you
@@ -7,6 +8,7 @@ Usage:
     cd backend
     python scripts/eval_extraction.py
 """
+from app.services.extraction import extract_from_image
 import sys
 import os
 import json
@@ -14,11 +16,12 @@ import re
 import glob
 from datetime import datetime
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..")))
 
-from app.services.extraction import extract_from_image
 
-RECEIPTS_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "receipts")
+RECEIPTS_DIR = os.path.join(os.path.dirname(
+    __file__), "..", "data", "receipts")
 
 
 def normalize_text(s: str) -> str:
@@ -60,7 +63,8 @@ def company_match(extracted: str, truth: str) -> bool:
 def main():
     image_paths = sorted(glob.glob(os.path.join(RECEIPTS_DIR, "*.jpg")))
     if not image_paths:
-        print(f"No receipts found in {RECEIPTS_DIR}. Run scripts/download_sroie.py first.")
+        print(
+            f"No receipts found in {RECEIPTS_DIR}. Run scripts/download_sroie.py first.")
         return
 
     total = len(image_paths)
@@ -69,19 +73,28 @@ def main():
     confidences = []
     rows = []
 
+    skipped = []
     for img_path in image_paths:
         key = os.path.splitext(os.path.basename(img_path))[0]
         gt_path = os.path.join(RECEIPTS_DIR, f"{key}.json")
         if not os.path.exists(gt_path):
+            skipped.append((key, "no ground-truth json"))
             continue
-        gt = json.load(open(gt_path))["entities"]
+
+        gt_raw = json.load(open(gt_path))
+        gt = gt_raw.get("entities")
+        if not gt:
+            skipped.append((key, "no 'entities' key (stale/old-format file)"))
+            continue
 
         result = extract_from_image(img_path)
         confidences.append(result.overall_confidence)
 
         c_ok = company_match(result.company.value, gt.get("company"))
-        d_ok = normalize_date(result.date.value) == normalize_date(gt.get("date"))
-        t_ok = normalize_amount(result.total.value) == normalize_amount(gt.get("total"))
+        d_ok = normalize_date(
+            result.date.value) == normalize_date(gt.get("date"))
+        t_ok = normalize_amount(
+            result.total.value) == normalize_amount(gt.get("total"))
 
         for field_name, ok, extracted in [
             ("company", c_ok, result.company.value),
@@ -100,9 +113,14 @@ def main():
         })
 
     print(f"\n=== Extraction accuracy over {total} real SROIE receipts ===\n")
+    if skipped:
+        print(f"\nSkipped {len(skipped)} file(s):")
+        for key, reason in skipped:
+            print(f"  {key}: {reason}")
     for f in ["company", "date", "total"]:
         acc = correct[f] / total * 100
-        precision = (correct[f] / field_attempted[f] * 100) if field_attempted[f] else 0
+        precision = (correct[f] / field_attempted[f] *
+                     100) if field_attempted[f] else 0
         print(f"  {f:10s}  accuracy: {acc:5.1f}%   "
               f"(precision when attempted: {precision:5.1f}%, "
               f"attempted {field_attempted[f]}/{total})")
@@ -120,17 +138,18 @@ def main():
         low_conf_wrong = sum(
             1 for r in low_conf_rows if not (r["company_ok"] and r["date_ok"] and r["total_ok"])
         )
-        print(f"\n  Low-confidence (<0.7) receipts: {len(low_conf_rows)}/{total}")
+        print(
+            f"\n  Low-confidence (<0.7) receipts: {len(low_conf_rows)}/{total}")
         print(f"  Of those, fully-wrong-somewhere: {low_conf_wrong}/{len(low_conf_rows)} "
               f"({low_conf_wrong/len(low_conf_rows)*100:.0f}%) — this is the routing signal HITL relies on")
 
-    out_path = os.path.join(os.path.dirname(__file__), "..", "data", "extraction_eval_report.json")
+    out_path = os.path.join(os.path.dirname(__file__),
+                            "..", "data", "extraction_eval_report.json")
     with open(out_path, "w") as f:
         json.dump({"total": total, "correct": correct, "field_attempted": field_attempted,
-                    "overall_accuracy_pct": overall, "avg_confidence": avg_conf, "rows": rows}, f, indent=2, default=str)
+                   "overall_accuracy_pct": overall, "avg_confidence": avg_conf, "rows": rows}, f, indent=2, default=str)
     print(f"\nFull report saved to {out_path}")
 
 
 if __name__ == "__main__":
     main()
-
