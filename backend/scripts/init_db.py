@@ -11,7 +11,7 @@ Usage:
 import sys
 import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.database import Base, engine
 from app.models import models  # noqa: F401  (import registers models with Base)
