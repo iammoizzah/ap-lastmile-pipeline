@@ -8,7 +8,6 @@ Usage:
     cd backend
     python scripts/eval_extraction.py
 """
-from app.services.extraction import extract_from_image
 import sys
 import os
 import json
@@ -18,7 +17,6 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..")))
-
 
 RECEIPTS_DIR = os.path.join(os.path.dirname(
     __file__), "..", "data", "receipts")
@@ -61,6 +59,10 @@ def company_match(extracted: str, truth: str) -> bool:
 
 
 def main():
+    # imported here, not at module top,
+    from app.services.extraction import extract_from_image
+    # so editor auto-sort can't move it
+
     image_paths = sorted(glob.glob(os.path.join(RECEIPTS_DIR, "*.jpg")))
     if not image_paths:
         print(
