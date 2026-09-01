@@ -42,7 +42,8 @@ TOTAL_KEYWORDS = re.compile(
     r"(GRAND\s*TOTAL|TOTAL\s*AMOUNT|AMOUNT\s*DUE|TOTAL\s*DUE|NET\s*TOTAL|^TOTAL)",
     re.IGNORECASE,
 )
-MONEY_PATTERN = re.compile(r"(?<![\d.])(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})|\d+\.\d{2})(?!\d)")
+MONEY_PATTERN = re.compile(
+    r"(?<![\d.])(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})|\d+\.\d{2})(?!\d)")
 
 DATE_PATTERNS = [
     # DD/MM/YYYY or DD-MM-YYYY
@@ -61,7 +62,8 @@ COMPANY_SUFFIXES = re.compile(
     r"RESTAURANT|CAFE|HARDWARE|INDUSTRIES|CORPORATION|CORP|CO\.?\s*LTD|LLC|INC)\b",
     re.IGNORECASE,
 )
-NOISE_LINE = re.compile(r"^[\W_]*$|COPY|RECEIPT|INVOICE|TAX\s*INVOICE", re.IGNORECASE)
+NOISE_LINE = re.compile(
+    r"^[\W_]*$|COPY|RECEIPT|INVOICE|TAX\s*INVOICE", re.IGNORECASE)
 
 
 @dataclass
@@ -81,20 +83,45 @@ class ExtractionResult:
 
     @property
     def overall_confidence(self) -> float:
-        vals = [self.company.confidence, self.date.confidence, self.total.confidence]
+        vals = [self.company.confidence,
+                self.date.confidence, self.total.confidence]
         return round(sum(vals) / len(vals), 3)
 
 
 def extract_total(lines: list[str]) -> FieldResult:
-    # Pass 1: look for an explicit "TOTAL"-style keyword line with a money value
-    for line in lines:
-        if TOTAL_KEYWORDS.search(line):
-            m = MONEY_PATTERN.findall(line)
-            if m:
-                value = m[-1].replace(",", "")
-                return FieldResult(value, 0.9, f"matched keyword line: {line.strip()!r}")
+    # Collect all keyword-matching candidate lines with their position.
+    # Exclude tax-only lines ("Total GST (RM) 24.89") — those are the tax
+    # amount, not the invoice total — UNLESS they explicitly say "inclusive"
+    # (e.g. "Total Inclusive GST: 193.00" *is* the real total in that phrasing).
+    candidates = []
+    for i, line in enumerate(lines):
+        if not TOTAL_KEYWORDS.search(line):
+            continue
+        has_gst = re.search(r"GST", line, re.IGNORECASE)
+        has_incl = re.search(r"INCL", line, re.IGNORECASE)
+        if has_gst and not has_incl:
+            continue  # tax-only line, not the invoice total
+        candidates.append((i, line))
 
-    # Pass 2: fallback — largest money value anywhere in the document
+    # Prefer the LAST matching candidate — receipts typically list a
+    # subtotal/tax breakdown before the final total line, so the last
+    # "Total"-labeled line is usually the real one.
+    for i, line in reversed(candidates):
+        m = MONEY_PATTERN.findall(line)
+        if m:
+            value = m[-1].replace(",", "")
+            return FieldResult(value, 0.9, f"matched keyword line: {line.strip()!r}")
+        # Amount sometimes lands on the following OCR line instead of the label line
+        if i + 1 < len(lines):
+            m_next = MONEY_PATTERN.findall(lines[i + 1])
+            if m_next:
+                value = m_next[-1].replace(",", "")
+                return FieldResult(
+                    value, 0.75,
+                    f"matched keyword line {line.strip()!r}, amount on following line: {lines[i+1].strip()!r}"
+                )
+
+    # Fallback: largest money value anywhere in the document
     all_amounts = []
     for line in lines:
         for m in MONEY_PATTERN.findall(line):
@@ -119,7 +146,8 @@ def extract_date(lines: list[str]) -> FieldResult:
 
 
 def extract_company(lines: list[str]) -> FieldResult:
-    candidates = [l for l in lines[:8] if l.strip() and not NOISE_LINE.match(l.strip())]
+    candidates = [l for l in lines[:8]
+                  if l.strip() and not NOISE_LINE.match(l.strip())]
 
     # Pass 1: a line with a company-like suffix (SDN BHD, ENTERPRISE, etc.)
     for line in candidates:
@@ -156,4 +184,3 @@ def extract_fields(raw_text: str) -> ExtractionResult:
 def extract_from_image(image_path: str) -> ExtractionResult:
     raw_text = run_ocr(image_path)
     return extract_fields(raw_text)
-
