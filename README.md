@@ -1,12 +1,12 @@
 # AP Last-Mile Pipeline
 
-Last-mile AI integration for enterprise accounts payable: invoice intake → AI extraction → human-in-the-loop review → mock ERP write-back → bank reconciliation — with multi-tenant config and a full audit trail.
+
+An integration layer that makes AI safe to use inside real accounts payable workflows. It extracts invoice data with OCR, scores its own confidence, routes uncertain items to a human reviewer, writes only approved results to a mock ERP, and reconciles payments against bank statements, with an audit log of every decision.
+
+**Why it exists:**
+manual invoice processing costs an estimated $10-15 per invoice and ~17 days of cycle time. The model reading the invoice is the easy part. The hard part is the last mile: governance, legacy-system write-back, and per-customer configuration.
 
 Built as a portfolio project demonstrating Forward Deployed Engineering skills: bridging demo-grade AI with the messy, governed reality of enterprise workflows.
-
-## Why this exists
-
-Manual invoice processing costs enterprises an estimated $10–15 per invoice and ~17 days of cycle time (industry benchmarks, cited in `docs/MVP_SPEC.md`). This project builds a working, narrow slice of what a production AP automation layer looks like — not a chatbot demo, but a pipeline with confidence scoring, human review, audit logging, and reconciliation.
 
 See [`docs/MVP_SPEC.md`](docs/MVP_SPEC.md) for the full spec: user stories, data model, architecture, milestones, and metrics.
 
