@@ -14,6 +14,7 @@ explain to a customer's finance team.
 """
 import re
 from dataclasses import dataclass, field, asdict
+from datetime import date, datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Optional
 
@@ -41,8 +42,10 @@ FLAG_SEVERITY = {
     "duplicate_invoice": "high",
     "weak_vendor_match": "medium",
     "no_po_match": "medium",
+    "future_date": "high",
     "possible_duplicate": "medium",
     "low_extraction_confidence": "medium",
+    "implausible_date": "medium",
     "missing_date": "low",
 }
 
@@ -143,6 +146,22 @@ def _fmt(amount: float) -> str:
     return f"{amount:,.2f}"
 
 
+# --- Date sanity ---------------------------------------------------------------
+_DATE_FORMATS = ["%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%m-%y", "%Y-%m-%d",
+                 "%d %b %Y", "%d %b %y", "%d %B %Y", "%d %B %y"]
+
+
+def parse_date(text: Optional[str]) -> Optional[date]:
+    if not text:
+        return None
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(text.strip(), fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 # --- Core evaluation ---------------------------------------------------------------
 def evaluate_invoice(
     *,
@@ -154,6 +173,7 @@ def evaluate_invoice(
     purchase_orders: list,
     existing_invoices: list,
     config: Optional[dict] = None,
+    today: Optional[date] = None,
 ) -> MatchResult:
     """
     vendors:           [{id, name, known_aliases}]
@@ -165,13 +185,28 @@ def evaluate_invoice(
     result = MatchResult()
     flags = []
 
-    # 1. Missing fields
+    # 1. Missing or implausible fields
+    today = today or date.today()
     if not vendor_text:
         flags.append(make_flag("missing_vendor", "No vendor name could be extracted."))
+    elif not normalize_name(vendor_text):
+        # e.g. the extractor returned just "SDN BHD": a legal suffix, not a name.
+        flags.append(make_flag(
+            "missing_vendor",
+            f"Extracted vendor '{vendor_text}' is only a legal suffix, not a company name."))
+        vendor_text = None  # don't try to match or dedupe on it
     if total is None:
         flags.append(make_flag("missing_total", "No total amount could be extracted."))
     if not date_text:
         flags.append(make_flag("missing_date", "No invoice date could be extracted."))
+    else:
+        parsed = parse_date(date_text)
+        if parsed is not None and parsed > today + timedelta(days=1):
+            flags.append(make_flag(
+                "future_date", f"Invoice date {date_text} is in the future (likely an OCR misread)."))
+        elif parsed is not None and parsed.year < 2000:
+            flags.append(make_flag(
+                "implausible_date", f"Invoice date {date_text} is before the year 2000."))
     if ext_conf < cfg["min_extraction_confidence"]:
         flags.append(make_flag(
             "low_extraction_confidence",

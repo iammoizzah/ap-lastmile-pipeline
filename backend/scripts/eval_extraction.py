@@ -51,11 +51,19 @@ def normalize_date(s: str):
     return s.upper()  # fall back to raw comparison if unparseable
 
 
-def company_match(extracted: str, truth: str) -> bool:
+# [patch v2: company matcher ignores legal suffixes]
+def company_match(extracted, truth) -> bool:
+    legal = re.compile(r"\b(SDN|BHD|S/B|LTD|LLC|INC|CORP|CORPORATION|CO|PLC|PTE|LIMITED)\b")
+
+    def core(s):
+        return re.sub(r"[^A-Z0-9]", "", legal.sub(" ", s.upper()))
+
     if not extracted or not truth:
         return False
-    e, t = normalize_text(extracted), normalize_text(truth)
-    return e in t or t in e  # substring match — receipts often extract a partial name
+    e, t = core(extracted), core(truth)
+    if len(e) < 3 or len(t) < 3:  # "SDN BHD" alone must not count as a company name
+        return False
+    return e in t or t in e  # substring match: receipts often yield a partial name
 
 
 def main():

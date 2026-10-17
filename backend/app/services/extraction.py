@@ -88,40 +88,67 @@ class ExtractionResult:
         return round(sum(vals) / len(vals), 3)
 
 
+# [patch v2: tiered total extraction]
+CASH_LINE = re.compile(r"^\s*CASH\b", re.IGNORECASE)
+
+
 def extract_total(lines: list[str]) -> FieldResult:
-    # Collect all keyword-matching candidate lines with their position.
-    # Exclude tax-only lines ("Total GST (RM) 24.89") — those are the tax
-    # amount, not the invoice total — UNLESS they explicitly say "inclusive"
-    # (e.g. "Total Inclusive GST: 193.00" *is* the real total in that phrasing).
-    candidates = []
+    candidates = []  # (index, line, [money values as float])
     for i, line in enumerate(lines):
         if not TOTAL_KEYWORDS.search(line):
             continue
         has_gst = re.search(r"GST", line, re.IGNORECASE)
-        has_incl = re.search(r"INCL", line, re.IGNORECASE)
-        if has_gst and not has_incl:
-            continue  # tax-only line, not the invoice total
-        candidates.append((i, line))
+        has_tax = re.search(r"\bTAX\b", line, re.IGNORECASE)
+        has_rate = re.search(r"\d+(?:\.\d+)?\s*%", line)
+        has_incl = re.search(r"INCL|NETT|NET\b", line, re.IGNORECASE)
+        if (has_gst or has_tax) and (has_rate or not has_incl):
+            continue  # tax-rate line or unlabeled tax/GST line, not the invoice total
 
-    # Prefer the LAST matching candidate — receipts typically list a
-    # subtotal/tax breakdown before the final total line, so the last
-    # "Total"-labeled line is usually the real one.
-    for i, line in reversed(candidates):
-        m = MONEY_PATTERN.findall(line)
-        if m:
-            value = m[-1].replace(",", "")
-            return FieldResult(value, 0.9, f"matched keyword line: {line.strip()!r}")
-        # Amount sometimes lands on the following OCR line instead of the label line
-        if i + 1 < len(lines):
-            m_next = MONEY_PATTERN.findall(lines[i + 1])
-            if m_next:
-                value = m_next[-1].replace(",", "")
+        values = []
+        for m in MONEY_PATTERN.findall(line):
+            try:
+                values.append(float(m.replace(",", "")))
+            except ValueError:
+                pass
+        candidates.append((i, line, values))
+
+    # Tier 1: a single-value candidate immediately followed by a "CASH ..." line with the
+    # SAME amount. The strongest signal: this is the amount that actually changed hands,
+    # not a subtotal, a tax line, or a duplicate summary row further down.
+    for i, line, values in candidates:
+        if len(values) == 1 and i + 1 < len(lines) and CASH_LINE.search(lines[i + 1]):
+            cash_vals = MONEY_PATTERN.findall(lines[i + 1])
+            if cash_vals and abs(float(cash_vals[0].replace(",", "")) - values[0]) < 0.01:
                 return FieldResult(
-                    value, 0.75,
-                    f"matched keyword line {line.strip()!r}, amount on following line: {lines[i+1].strip()!r}"
-                )
+                    f"{values[0]:.2f}", 0.95,
+                    f"'{line.strip()}' amount matches following CASH line (high-confidence signal)")
 
-    # Fallback: largest money value anywhere in the document
+    # Tier 2: the LAST single-value candidate. A line with exactly one number is more likely
+    # a clean total than a multi-number breakdown row, and receipts list tax before the total.
+    single_value = [(i, line, v) for i, line, v in candidates if len(v) == 1]
+    if single_value:
+        i, line, values = single_value[-1]
+        return FieldResult(f"{values[0]:.2f}", 0.9, f"matched keyword line: {line.strip()!r}")
+
+    # Tier 3: keyword line with no money on it; the amount sometimes lands on the next OCR line.
+    for i, line, values in reversed(candidates):
+        if not values and i + 1 < len(lines):
+            next_vals = MONEY_PATTERN.findall(lines[i + 1])
+            if next_vals:
+                return FieldResult(
+                    next_vals[-1].replace(",", ""), 0.75,
+                    f"matched keyword line {line.strip()!r}, amount on following line: "
+                    f"{lines[i + 1].strip()!r}")
+
+    # Tier 4: only multi-number breakdown rows matched. Low confidence on purpose.
+    if candidates:
+        i, line, values = candidates[-1]
+        if values:
+            return FieldResult(
+                f"{values[-1]:.2f}", 0.55,
+                f"low-confidence: only a multi-value breakdown row matched: {line.strip()!r}")
+
+    # Fallback: largest money value anywhere on the receipt.
     all_amounts = []
     for line in lines:
         for m in MONEY_PATTERN.findall(line):
@@ -130,8 +157,8 @@ def extract_total(lines: list[str]) -> FieldResult:
             except ValueError:
                 continue
     if all_amounts:
-        value = f"{max(all_amounts):.2f}"
-        return FieldResult(value, 0.5, "fallback: largest money value on receipt (no TOTAL keyword found)")
+        return FieldResult(f"{max(all_amounts):.2f}", 0.5,
+                           "fallback: largest money value on receipt (no TOTAL keyword found)")
 
     return FieldResult(None, 0.0, "no money values found")
 
@@ -145,16 +172,39 @@ def extract_date(lines: list[str]) -> FieldResult:
     return FieldResult(None, 0.0, "no date pattern matched")
 
 
-def extract_company(lines: list[str]) -> FieldResult:
-    candidates = [l for l in lines[:8]
-                  if l.strip() and not NOISE_LINE.match(l.strip())]
+# [patch v2: company sanity filters]
+_C_NOISE = re.compile(
+    r"COPY|RECEIPT|INVOICE|CASH\s*SALE|CASH\s*BILL|DUPLICATE|ORIGINAL", re.IGNORECASE)
+_C_ADDRESS = re.compile(
+    r"\b(JALAN|JLN|LORONG|LOT|TAMAN|BANDAR|KAWASAN|BLOK|BLOCK|LEVEL|FLOOR|TEL|FAX|PHONE|"
+    r"GST|ROC|EMAIL|WWW)\b|\bNO\.?\s*\d|@|\b\d{5}\b", re.IGNORECASE)
+_C_LEGAL = re.compile(r"\b(SDN\.?\s*BHD\.?|S/B|BHD|LTD|LLC|INC|CORP|CORPORATION|PLC)\b",
+                      re.IGNORECASE)
+_C_HINT = re.compile(
+    r"\b(SDN\.?\s*BHD|S/B|BHD|ENTERPRISES?|TRADING|SERVICES?|STORE|MARKET|MART|SHOP|SUPPLIES|"
+    r"RESTAURANT|CAFE|HARDWARE|INDUSTRIES|CORPORATION|CORP|LTD|LLC|INC|PHARMACY|STATIONERY|"
+    r"GROCER|KOPITIAM)\b", re.IGNORECASE)
 
-    # Pass 1: a line with a company-like suffix (SDN BHD, ENTERPRISE, etc.)
+
+def _company_plausible(line: str) -> bool:
+    s = line.strip()
+    if len(re.sub(r"[^A-Za-z]", "", s)) < 4:
+        return False
+    if _C_NOISE.search(s) or _C_ADDRESS.search(s):
+        return False
+    # must contain a real name once legal suffixes ("SDN BHD") are removed
+    return len(re.sub(r"[^A-Za-z]", "", _C_LEGAL.sub(" ", s))) >= 3
+
+
+def extract_company(lines: list[str]) -> FieldResult:
+    candidates = [l for l in lines[:10] if _company_plausible(l)]
+
+    # Pass 1: a plausible line that also looks like a business name
     for line in candidates:
-        if COMPANY_SUFFIXES.search(line):
+        if _C_HINT.search(line):
             return FieldResult(line.strip(), 0.8, f"matched company-suffix pattern: {line.strip()!r}")
 
-    # Pass 2: fallback — first substantial all-caps-ish line near the top
+    # Pass 2: fallback, the first plausible all-caps line near the top
     for line in candidates:
         letters = re.sub(r"[^A-Za-z]", "", line)
         if len(letters) >= 5 and letters.isupper():

@@ -1,75 +1,17 @@
 """
 End-to-end test of upload -> match -> review queue -> decision -> audit trail,
 through the real FastAPI routes against an in-memory SQLite database.
-OCR is stubbed so the test needs no Tesseract and no image fixtures.
+Extraction is stubbed, so these tests cover matching and review only.
 """
 import io
 
-import pytest
-from fastapi.testclient import TestClient
 from PIL import Image
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
-
-from app.database import Base, get_db
-from app.main import app
-from app.models import models
-from app.routes import invoices as invoices_route
-from app.services.extraction import extract_fields
-
-RECEIPT_OJC = """OJC MARKETING SDN BHD
-DATE : 15/01/2019 11:05:16 AM
-TOTAL 193.00
-"""
-RECEIPT_UNKNOWN = """MYSTERY TRADING SDN BHD
-DATE : 02/02/2019
-TOTAL 77.50
-"""
-RECEIPT_OJC_WRONG_TOTAL = """OJC MARKETING SDN BHD
-DATE : 20/01/2019
-TOTAL 410.00
-"""
 
 
-@pytest.fixture()
-def client(monkeypatch, tmp_path):
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
-                           poolclass=StaticPool)
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-
-    # seed one tenant, one vendor, one open PO
-    with Session() as db:
-        t = models.Tenant(name="Test Co", config={})
-        db.add(t); db.flush()
-        v = models.Vendor(tenant_id=t.id, name="OJC MARKETING SDN BHD",
-                          known_aliases=["OJC MARKETING"])
-        db.add(v); db.flush()
-        db.add(models.PurchaseOrder(tenant_id=t.id, po_number="PO-1001", vendor_id=v.id,
-                                    expected_amount=193.00, status="open"))
-        db.commit()
-
-    def override_get_db():
-        db = Session()
-        try:
-            yield db
-        finally:
-            db.close()
-
-    app.dependency_overrides[get_db] = override_get_db
-    monkeypatch.setattr(invoices_route, "UPLOAD_DIR", str(tmp_path))
-
-    # Stub OCR: the "image" content is irrelevant; the text comes from the filename key.
-    texts = {}
-    monkeypatch.setattr(invoices_route, "extract_from_image",
-                        lambda path: extract_fields(texts["current"]))
-
-    c = TestClient(app)
-    c.texts = texts
-    c.Session = Session
-    yield c
-    app.dependency_overrides.clear()
+# (company, date, total) as the extractor would return them
+RECEIPT_OJC = ("OJC MARKETING SDN BHD", "15/01/2019", "193.00")
+RECEIPT_UNKNOWN = ("MYSTERY TRADING SDN BHD", "02/02/2019", "77.50")
+RECEIPT_OJC_WRONG_TOTAL = ("OJC MARKETING SDN BHD", "20/01/2019", "410.00")
 
 
 def png_bytes():
@@ -78,8 +20,8 @@ def png_bytes():
     return buf.getvalue()
 
 
-def upload(client, text, name="r.png"):
-    client.texts["current"] = text
+def upload(client, extracted, name="r.png"):
+    client.texts["current"] = extracted
     return client.post("/invoices/upload", files={"file": (name, png_bytes(), "image/png")})
 
 

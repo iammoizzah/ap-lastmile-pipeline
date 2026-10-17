@@ -109,3 +109,43 @@ def test_decide_route_requires_both_confidences():
     assert decide_route([], 0.9, 0.9) == "fast_track"
     assert decide_route([], 0.9, 0.4) == "review"
     assert decide_route([make_flag("no_po_match", "x")], 0.99, 0.99) == "review"
+
+
+# --- date and vendor sanity (added after the first 40-receipt run) -------------------
+from datetime import date
+
+TODAY = date(2026, 10, 17)
+
+
+def test_future_date_is_flagged_high_severity():
+    # a real case from the SROIE run: OCR read 2018 as 2078
+    r = evaluate(date_text="09/02/2078", today=TODAY)
+    assert "future_date" in codes(r)
+    assert any(f.code == "future_date" and f.severity == "high" for f in r.flags)
+    assert r.route == "review"
+
+
+def test_normal_old_receipt_date_is_fine():
+    assert "future_date" not in codes(evaluate(date_text="15/01/2019", today=TODAY))
+    assert "future_date" not in codes(evaluate(date_text="20/03/18", today=TODAY))
+
+
+def test_pre_2000_date_is_implausible():
+    assert "implausible_date" in codes(evaluate(date_text="01/01/1978", today=TODAY))
+
+
+def test_unparseable_date_is_not_flagged_as_future():
+    c = codes(evaluate(date_text="gibberish", today=TODAY))
+    assert "future_date" not in c and "implausible_date" not in c
+
+
+def test_legal_suffix_only_vendor_counts_as_missing_not_unknown():
+    r = evaluate(vendor_text="SDN BHD")
+    assert "missing_vendor" in codes(r)
+    assert "no_vendor_match" not in codes(r)
+    assert r.route == "review"
+
+
+def test_legal_suffix_only_vendor_does_not_trigger_duplicate_check():
+    existing = [{"id": "abcdef123456", "vendor": "SDN BHD", "date": "15/01/2019", "total": 193.00}]
+    assert "duplicate_invoice" not in codes(evaluate(vendor_text="SDN BHD", existing_invoices=existing))
