@@ -20,3 +20,6 @@ Faker==29.0.0
 # Optional: SROIE download (Milestone 1 helper only)
 datasets==3.0.1
 
+pytest>=8.0
+httpx>=0.27
+requests>=2.32
