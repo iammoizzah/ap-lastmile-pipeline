@@ -186,13 +186,23 @@ _C_HINT = re.compile(
     r"GROCER|KOPITIAM)\b", re.IGNORECASE)
 
 
+# [patch v3: business names may contain place words]
+_C_CONTACT = re.compile(
+    r"\b(TEL|FAX|PHONE|GST|ROC|EMAIL|WWW)\b|\bNO\.?\s*\d|@|\b\d{5}\b", re.IGNORECASE)
+_C_PLACE = re.compile(
+    r"\b(JALAN|JLN|LORONG|LOT|TAMAN|BANDAR|KAWASAN|BLOK|BLOCK|LEVEL|FLOOR)\b", re.IGNORECASE)
+
+
 def _company_plausible(line: str) -> bool:
     s = line.strip()
     if len(re.sub(r"[^A-Za-z]", "", s)) < 4:
         return False
-    if _C_NOISE.search(s) or _C_ADDRESS.search(s):
+    if _C_NOISE.search(s) or _C_CONTACT.search(s):
         return False
-    # must contain a real name once legal suffixes ("SDN BHD") are removed
+    # Place words (TAMAN, JALAN, LOT ...) mark an address line, unless the line also looks
+    # like a business name: "BOOK TA .K (TAMAN DAYA) SDN BHD" is a company, "NO 12 JALAN BESAR" is not.
+    if _C_PLACE.search(s) and not _C_HINT.search(s):
+        return False
     return len(re.sub(r"[^A-Za-z]", "", _C_LEGAL.sub(" ", s))) >= 3
 
 
