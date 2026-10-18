@@ -72,3 +72,9 @@ def test_clean_receipt_end_to_end():
     r = extract_fields("OJC MARKETING SDN BHD\nDATE : 15/01/2019 11:05:16 AM\nTotal Inclusive GST: 193.00")
     assert (r.company.value, r.date.value, r.total.value) == ("OJC MARKETING SDN BHD", "15/01/2019", "193.00")
     assert r.overall_confidence >= 0.85
+
+
+def test_company_name_containing_a_place_word_is_still_a_company():
+    # real SROIE receipt: "TAMAN" is part of the branch name, not an address line
+    text = "BOOK TA .K (TAMAN DAYA) SDN BHD\nNO.53 55,57 & 59, JALAN SAGU 18, TAMAN DAYA,\n81100 JOHOR BAHRU"
+    assert company_of(text) == "BOOK TA .K (TAMAN DAYA) SDN BHD"
