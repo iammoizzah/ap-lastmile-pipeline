@@ -1,5 +1,5 @@
 # AP Last-Mile Pipeline
-
+![alt text](image.png)
 An integration layer that makes AI safe to use inside real accounts payable workflows. It extracts invoice data with OCR, scores its own confidence, routes uncertain items to a human reviewer, writes only approved results to a mock ERP, and reconciles payments against bank statements, with an audit log of every decision.
 
 **Why it exists:**
