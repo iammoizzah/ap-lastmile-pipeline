@@ -27,3 +27,5 @@ backend/data/
 # Env files with secrets
 *.env
 
+
+*.bak
