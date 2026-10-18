@@ -1,80 +1,55 @@
 """
-Downloads a sample of the SROIE dataset (ICDAR 2019 Robust Reading
-Challenge — real scanned receipts with ground-truth key-info annotations:
-company, date, address, total) from its Hugging Face mirror, for use as
-realistic test input to the invoice extraction pipeline.
-
-Source: https://huggingface.co/datasets/jsdnrs/ICDAR2019-SROIE
-(corrected/extended version of the original ICDAR 2019 SROIE Task 3 data;
-confirmed schema: image, key, image_size, entities{company,date,address,total},
-words, bboxes)
-
-Requires: pip install datasets  (already in requirements.txt)
+Downloads SROIE receipts (ICDAR 2019: real scanned receipts with ground-truth company,
+date, address and total) from Hugging Face (jsdnrs/ICDAR2019-SROIE).
 
 Usage:
     cd backend
-    python scripts/download_sroie.py --n 25
+    python3 scripts/download_sroie.py --n 25                              # first 25 of the test split
+    python3 scripts/download_sroie.py --split train --n 100               # first 100 of train
+    python3 scripts/download_sroie.py --split train --start 100 --n 100 --out data/receipts_fresh
+                                                                          # a NEW batch nobody has seen
 
-Output:
-    backend/data/receipts/<key>.jpg
-    backend/data/receipts/<key>.json   (ground truth: company, date, total,
-                                         address, plus raw OCR words/bboxes
-                                         for later line-level matching)
+Output (per receipt):  <out>/<key>.jpg  and  <out>/<key>.json  (entities, words, bboxes)
 """
 import argparse
 import json
 import os
 
-OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "receipts")
+DEFAULT_OUT = os.path.join(os.path.dirname(__file__), "..", "data", "receipts")
 
 
-def main(n: int, split: str):
+def main(n: int, split: str, start: int, out: str):
     try:
         from datasets import load_dataset
     except ImportError:
-        raise SystemExit(
-            "Missing dependency. Run: python3 -m pip install -r requirements.txt"
-        )
+        raise SystemExit("Missing dependency. Run: python3 -m pip install -r requirements.txt")
 
-    os.makedirs(OUT_DIR, exist_ok=True)
-    print(f"Loading SROIE sample from Hugging Face (jsdnrs/ICDAR2019-SROIE), "
-          f"split={split}, n={n} ...")
-    ds = load_dataset("jsdnrs/ICDAR2019-SROIE", split=f"{split}[:{n}]")
+    out = os.path.abspath(out)
+    os.makedirs(out, exist_ok=True)
+    print(f"Loading SROIE from Hugging Face (jsdnrs/ICDAR2019-SROIE), split={split}, "
+          f"rows {start} to {start + n - 1} ...")
+    ds = load_dataset("jsdnrs/ICDAR2019-SROIE", split=f"{split}[{start}:{start + n}]")
 
     saved = 0
     for row in ds:
         try:
             key = row["key"]
-            image = row["image"]
-
-            img_path = os.path.join(OUT_DIR, f"{key}.jpg")
-            image.convert("RGB").save(img_path)
-
-            gt_path = os.path.join(OUT_DIR, f"{key}.json")
-            ground_truth = {
-                "key": key,
-                "entities": row.get("entities", {}),
-                "words": row.get("words", []),
-                "bboxes": row.get("bboxes", []),
-            }
-            with open(gt_path, "w") as f:
-                json.dump(ground_truth, f, indent=2)
-
+            row["image"].convert("RGB").save(os.path.join(out, f"{key}.jpg"))
+            with open(os.path.join(out, f"{key}.json"), "w") as f:
+                json.dump({"key": key, "entities": row.get("entities", {}),
+                           "words": row.get("words", []), "bboxes": row.get("bboxes", [])}, f, indent=2)
             saved += 1
         except Exception as e:
             print(f"  skipped {row.get('key', '?')}: {e}")
 
-    print(f"Saved {saved} receipt images + ground-truth files to {OUT_DIR}")
-    if saved:
-        sample_key = json.load(open(os.path.join(OUT_DIR, f"{ds[0]['key']}.json")))
-        print("Sample entities from first receipt:", sample_key["entities"])
+    print(f"Saved {saved} receipts to {out}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--n", type=int, default=25, help="number of receipts to download")
-    parser.add_argument("--split", type=str, default="test", choices=["train", "test"],
-                         help="which SROIE split to pull from (default: test, 361 receipts)")
-    args = parser.parse_args()
-    main(args.n, args.split)
-
+    p = argparse.ArgumentParser()
+    p.add_argument("--n", type=int, default=25, help="how many receipts")
+    p.add_argument("--split", default="test", choices=["train", "test"])
+    p.add_argument("--start", type=int, default=0, help="row offset within the split")
+    p.add_argument("--out", default=DEFAULT_OUT, help="output folder")
+    a = p.parse_args()
+    main(a.n, a.split, a.start, a.out)
