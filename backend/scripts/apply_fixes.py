@@ -32,6 +32,7 @@ EVAL = os.path.join(HERE, "eval_extraction.py")
 MARK_TOTAL = "[patch v2: tiered total extraction]"
 MARK_COMPANY = "[patch v2: company sanity filters]"
 MARK_EVAL = "[patch v2: company matcher ignores legal suffixes]"
+MARK_ADDR = "[patch v3: business names may contain place words]"
 
 TOTAL_BLOCK = '''# ''' + MARK_TOTAL + '''
 CASH_LINE = re.compile(r"^\\s*CASH\\b", re.IGNORECASE)
@@ -149,6 +150,27 @@ def extract_company(lines: list[str]) -> FieldResult:
     return FieldResult(None, 0.0, "no plausible company line found in top of receipt")
 '''
 
+
+ADDR_BLOCK = '''# ''' + MARK_ADDR + '''
+_C_CONTACT = re.compile(
+    r"\\b(TEL|FAX|PHONE|GST|ROC|EMAIL|WWW)\\b|\\bNO\\.?\\s*\\d|@|\\b\\d{5}\\b", re.IGNORECASE)
+_C_PLACE = re.compile(
+    r"\\b(JALAN|JLN|LORONG|LOT|TAMAN|BANDAR|KAWASAN|BLOK|BLOCK|LEVEL|FLOOR)\\b", re.IGNORECASE)
+
+
+def _company_plausible(line: str) -> bool:
+    s = line.strip()
+    if len(re.sub(r"[^A-Za-z]", "", s)) < 4:
+        return False
+    if _C_NOISE.search(s) or _C_CONTACT.search(s):
+        return False
+    # Place words (TAMAN, JALAN, LOT ...) mark an address line, unless the line also looks
+    # like a business name: "BOOK TA .K (TAMAN DAYA) SDN BHD" is a company, "NO 12 JALAN BESAR" is not.
+    if _C_PLACE.search(s) and not _C_HINT.search(s):
+        return False
+    return len(re.sub(r"[^A-Za-z]", "", _C_LEGAL.sub(" ", s))) >= 3
+'''
+
 EVAL_BLOCK = '''# ''' + MARK_EVAL + '''
 def company_match(extracted, truth) -> bool:
     legal = re.compile(r"\\b(SDN|BHD|S/B|LTD|LLC|INC|CORP|CORPORATION|CO|PLC|PTE|LIMITED)\\b")
@@ -219,6 +241,9 @@ def check_extraction(mod) -> list:
     c = company("99 SPEED MART S/B (519537-X)\nLOT 12 JALAN BESAR")
     if c != "99 SPEED MART S/B (519537-X)":
         fail.append(f"company starting with digits: got {c!r}")
+    c = company("BOOK TA .K (TAMAN DAYA) SDN BHD\nNO.53 55,57 & 59, JALAN SAGU 18, TAMAN DAYA,\n81100 JOHOR BAHRU")
+    if c != "BOOK TA .K (TAMAN DAYA) SDN BHD":
+        fail.append(f"company containing a place word: got {c!r}")
     c = company("UROKO JAPANESE CUISINE SDN BHD\nNO. 5 JALAN SATU")
     if c != "UROKO JAPANESE CUISINE SDN BHD":
         fail.append(f"company: got {c!r}")
@@ -248,14 +273,16 @@ def main():
     # --- extraction.py ---
     path = os.path.abspath(EXTRACTION)
     src = open(path).read()
-    if MARK_TOTAL in src and MARK_COMPANY in src:
+    new = src
+    if MARK_TOTAL not in new:
+        new = replace_function(new, "extract_total", TOTAL_BLOCK)
+    if MARK_COMPANY not in new:
+        new = replace_function(new, "extract_company", COMPANY_BLOCK)
+    if MARK_ADDR not in new:
+        new = replace_function(new, "_company_plausible", ADDR_BLOCK)
+    if new == src:
         print("extraction.py: already patched, skipping.")
     else:
-        new = src
-        if MARK_TOTAL not in new:
-            new = replace_function(new, "extract_total", TOTAL_BLOCK)
-        if MARK_COMPANY not in new:
-            new = replace_function(new, "extract_company", COMPANY_BLOCK)
         ast.parse(new)
         failures = check_extraction(load_module(new, "extraction_candidate"))
         if failures:
