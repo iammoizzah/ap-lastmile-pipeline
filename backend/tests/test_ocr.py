@@ -1,4 +1,5 @@
 """Tests for the OCR strategies. The OCR-running tests are skipped if Tesseract isn't installed."""
+import os
 import shutil
 
 import pytest
@@ -38,14 +39,30 @@ def test_darkest_channel_keeps_pink_print_dark():
     assert ocr_mod._gray(pink).getpixel((0, 0)) > 100  # plain greyscale washes it out
 
 
+FONT_CANDIDATES = [
+    "/System/Library/Fonts/Menlo.ttc",                              # macOS
+    "/System/Library/Fonts/Monaco.ttf",                             # macOS
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",          # Linux
+    "C:/Windows/Fonts/consola.ttf",                                 # Windows
+]
+
+
+def _readable_font():
+    """A real monospace font at a legible size. Pillow's built-in default font is tiny, and tiny
+    text is a different (and much harder) problem than the one this test is about."""
+    for path in FONT_CANDIDATES:
+        if os.path.exists(path):
+            return ImageFont.truetype(path, 28)
+    pytest.skip("no suitable font found on this machine")
+
+
 @needs_tesseract
 def test_ocr_reads_a_clean_generated_receipt_with_every_variant(tmp_path):
-    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 22) \
-        if shutil.os.path.exists("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf") else ImageFont.load_default()
-    img = Image.new("RGB", (640, 160), "white")
+    font = _readable_font()
+    img = Image.new("RGB", (800, 200), "white")
     d = ImageDraw.Draw(img)
-    d.text((20, 20), "ACME TRADING SDN BHD", font=font, fill="black")
-    d.text((20, 70), "TOTAL 123.45", font=font, fill="black")
+    d.text((20, 25), "ACME TRADING SDN BHD", font=font, fill="black")
+    d.text((20, 100), "TOTAL 123.45", font=font, fill="black")
     path = tmp_path / "r.png"
     img.save(path)
     for name in ["raw", "up_psm6", "up_min_psm6", "otsu_psm6"]:
